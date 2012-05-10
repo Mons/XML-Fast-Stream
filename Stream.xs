@@ -110,23 +110,30 @@ const char *chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-01234
 		case 0xd  :\
 		case 0x20
 
+#define TRACE 0
+
 void sxml_collapse(StreamXML * s) {
 	if (s->last == s->buf) return;
 	int i;
 	int freed = s->last - s->buf;
 	//warn("rewind on %d (%p -> %p -> %p)", freed, s->buf, s->last, s->ptr);
 	//warn("before rewind: %d [%s]",s->size, s->buf);
-	for(i=1;i<s->depth;i++) {
-		warn("stack %d: %s\n",i,s->stack[i].str);
-	}
 	s->size         -= freed;
 	s->ptr          -= freed;
 	s->tag_name     -= freed;
 	s->stanza_begin -= freed;
 	memmove(s->buf, s->last, s->size);
+	for(i=1;i<s->depth;i++) {
+		s->stack[i].str -= freed;
+		//warn("stack %d: %-.*s\n",i,s->stack[i].len,s->stack[i].str);
+	}
 	s->last = s->buf;
 	s->buf[s->size] = 0;
-	//warn("after rewind: %d [%s] (%p -> %p)",s->size, s->buf, s->buf, s->ptr);
+#if TRACE
+	memset(s->buf + s->size, 'a', s->buf_size - s->size);
+	warn("after rewind: Size:%d; [%-.*s] (%p -> %p)",s->size, s->size, s->buf, s->buf, s->ptr);
+	warn("XXX(%d)[%s]", s->buf_size - s->size, s->buf);
+#endif
 	
 	return;
 /*
@@ -155,8 +162,12 @@ void sxml_tag_open(StreamXML * s) {
 			return;
 		}
 		s->buf_size -= s->tag_name_len;
-		memcpy(s->buf + s->buf_size - s->tag_name_len, s->tag_name, s->tag_name_len);
-		s->tag_name = s->buf + s->buf_size - s->tag_name_len;
+		memcpy(s->buf + s->buf_size, s->tag_name, s->tag_name_len);
+		s->tag_name = s->buf + s->buf_size;
+#if TRACE
+		warn("Lower buf size on %d, name: %p (%-.*s) ", s->tag_name_len, s->tag_name,s->tag_name_len,s->tag_name);
+		warn("XXX(%d)[%s]", s->buf_size - s->size, s->buf);
+#endif
 	}
 	s->stack[s->depth].len = s->tag_name_len;
 	s->stack[s->depth].str = s->tag_name;
@@ -165,7 +176,11 @@ void sxml_tag_open(StreamXML * s) {
 }
 
 void sxml_tag_nochild(StreamXML * s) {
-	
+	if (s->depth == 1) {
+		s->stanza( s, s->tag_name - 1, s->tag_len + 2, s->tag_name, s->tag_name_len );
+		s->last = s->tag_name + s->tag_len + 1;
+		
+	}
 }
 
 void sxml_tag_close(StreamXML * s) {
@@ -191,13 +206,24 @@ void sxml_tag_close(StreamXML * s) {
 	}
 }
 
+void sxml_declaration(StreamXML * s) {
+	//printf("declaration [%-.*s]\n",s->tag_name_len, s->tag_name);
+}
+
 
 
 void sxml_drain(StreamXML * s) {
 	unsigned char *p;
-	//printf("Call drain %p -> %p\n", s->ptr, s->buf + s->size);
+#if TRACE
+	printf("Call drain (size: %d) %p -> %p (%-.10s...)\n", s->size, s->ptr, s->buf + s->size, s->ptr);
+#endif
 	for ( p = s->ptr; p < s->buf + s->size; p++ ) {
-		//printf("S:%s; D:%d; buf=[%-.*s]\n", state_name[s->state], s->depth, s->size + ( s->buf - p ), p);
+#if TRACE
+		printf("S:%s; D:%d; P: %d [%02x]; buf=[%d][%-.*s] + [%-.*s]\n", state_name[s->state], s->depth, p - s->buf, *p, s->buf_size, s->size + ( s->buf - p ), p,
+			s->depth ? s->stack[0].len : 4,
+			s->depth ? s->stack[0].str : "none"
+		);
+#endif
 		switch(s->state) {
 			case START:
 				switch(*p) {
@@ -361,7 +387,7 @@ void sxml_drain(StreamXML * s) {
 			case XMLDEC_END2:
 					switch(*p) {
 						case '>':
-							printf("declaration [%-.*s]\n",s->tag_name_len, s->tag_name);
+							sxml_declaration(s);
 							if (strncasecmp( s->tag_name, "xml", s->tag_name_len ) == 0 ) {
 								s->state = NONE;
 								s->depth = 0;
@@ -506,7 +532,7 @@ void sxml_drain(StreamXML * s) {
 						case '/':
 						case '>':
 						case '?':
-							s->error(s, SYNTAX_ERROR, "Bad termination for ATTR_NAME");
+							s->error(s, SYNTAX_ERROR, "Bad termination for ATTR_NAME: %0.5s...", p);
 							return;
 						default:
 							break;
@@ -665,8 +691,10 @@ new(SV *pk, HV * conf)
 CODE:
 	HV *stash = gv_stashpv(SvPV_nolen(pk), TRUE);
 	plctx * ctx = safemalloc( sizeof(plctx) );
+	if (!ctx) croak("Can't allocate context");
 	memset(ctx,0,sizeof(plctx));
 	StreamXML * s = safemalloc( sizeof(StreamXML) );
+	if (!s) croak("Can't allocate parser");
 	memset(s,0,sizeof(StreamXML));
 	
 	s->buf_size = 4096; // from param
@@ -691,9 +719,11 @@ CODE:
 	s->state = NONE;
 	s->allow_comments = 1; // from param
 	s->last = s->ptr = s->buf = safemalloc( s->buf_size );
-	s->error = on_error;
-	s->stanza = on_stanza;
-	s->stream_open = on_stream_open;
+	if (!s->buf) croak("Can't allocate buffer");
+	//memset(s->buf, 'x', s->buf_size ); s->buf[s->buf_size] = 0;
+	s->error        = on_error;
+	s->stanza       = on_stanza;
+	s->stream_open  = on_stream_open;
 	s->stream_close = on_stream_close;
 	s->stack_size = 256; // from param
 	
@@ -701,6 +731,7 @@ CODE:
 	
 	s->ctx = (void *)ctx;
 	s->stack = safemalloc( sizeof(lstring) * s->stack_size );
+	if (!s->stack) croak("Can't allocate stack");
 	memset(s->stack,0, sizeof(lstring) * s->stack_size );
 	
 	ST(0) = sv_2mortal (sv_bless (newRV_noinc (newSViv(PTR2IV( s ))), stash));
@@ -712,28 +743,41 @@ CODE:
 	StreamXML * s = ( StreamXML * ) SvUV( SvRV( self ) );
 	STRLEN len, part;
 	char *buf = SvPV( svbuf,len );
-	char *ptr;
+	char *end;
 	if (s->buf_size - s->size < len) {
-		if (( part = s->buf_size - s->size - 30 ) > 0) {
-			ptr = buf;
+		end = buf + len;
+		while ( ( ( part = s->buf_size - s->size ) > 0 ) && buf < end ) {
+			if (part > end - buf) part = end - buf;
+			//warn("Copy part of size %d: [%-.*s]", part, part,buf);
+			memcpy( s->buf + s->size, buf, part );
+			//printf("Buffer = [%s]\n",s->buf);
+			s->size += part;
+			//s->buf[s->size] = 0;
+#if TRACE
+			printf("Received (%d) [%-.*s]. Now at: [%c][%s] (%p -> %d -> %p)\n", part, part, buf, *s->ptr, s->ptr, s->buf, s->size, s->ptr);
+#endif
 			
-			memcpy( s->buf + s->size, ptr, part );
-			s->size += len;
-			s->buf[s->size] = 0;
-			//printf("Received (%d) [%s]. Now at: [%c][%s] (%p -> %d -> %p)\n", len, buf, *s->ptr, s->ptr, s->buf, s->size, s->ptr);
+			buf += part;
+			
 			sxml_drain(s);
 			
-			croak("TODO: %d", s->buf_size - s->size);
+			//croak("TODO: %d", s->buf_size - s->size);
 			
-		} else {
-			croak("Buffer too small (%d). Received: +%d, Current (%d): %-.100s...", s->buf_size, len, s->size, s->buf);
 		}
+		if (buf == end) {
+		}
+		else {
+			croak("Buffer too small (%d). Need: +%d, Current (%d): %-.100s...", s->buf_size, end - buf, s->size, s->buf);
+		}
+	} else {
+		memcpy( s->buf + s->size, buf, len );
+		s->size += len;
+		s->buf[s->size] = 0;
+#if TRACE
+		printf("Received (%d) [%-.*s]. Now at: [%c][%s] (%p -> %d -> %p)\n", len, len, buf, *s->ptr, s->ptr, s->buf, s->size, s->ptr);
+#endif
+		sxml_drain(s);
 	}
-	memcpy( s->buf + s->size, buf, len );
-	s->size += len;
-	s->buf[s->size] = 0;
-	//printf("Received (%d) [%s]. Now at: [%c][%s] (%p -> %d -> %p)\n", len, buf, *s->ptr, s->ptr, s->buf, s->size, s->ptr);
-	sxml_drain(s);
 
 void
 DESTROY(SV *self)

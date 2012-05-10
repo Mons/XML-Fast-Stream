@@ -1,0 +1,8 @@
+Changes
+Makefile.PL
+MANIFEST
+ppport.h
+README
+Stream.xs
+t/XML-Fast-Stream.t
+lib/XML/Fast/Stream.pm
