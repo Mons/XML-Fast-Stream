@@ -4,6 +4,21 @@
 
 #include "ppport.h"
 
+struct _tag;
+struct _attr;
+
+typedef struct {
+	SV *name;
+	SV *value;
+} attr;
+
+typedef struct {
+	SV          *name;
+	AV          *attrs;
+	struct _tag *children;
+	char        *value;
+} tag;
+
 typedef enum {
 		START,
 		XMLDEC,
@@ -122,6 +137,9 @@ void sxml_collapse(StreamXML * s) {
 	s->ptr          -= freed;
 	s->tag_name     -= freed;
 	s->stanza_begin -= freed;
+#if TRACE
+	warn("memmove %p -> %p (%d)",s->buf, s->last, s->size);
+#endif
 	memmove(s->buf, s->last, s->size);
 	for(i=1;i<s->depth;i++) {
 		s->stack[i].str -= freed;
@@ -169,6 +187,7 @@ void sxml_tag_open(StreamXML * s) {
 		warn("XXX(%d)[%s]", s->buf_size - s->size, s->buf);
 #endif
 	}
+	//warn("Put to stack at depth %d %-.*s",s->depth,s->tag_name_len, s->tag_name);
 	s->stack[s->depth].len = s->tag_name_len;
 	s->stack[s->depth].str = s->tag_name;
 	s->depth++;
@@ -462,7 +481,7 @@ void sxml_drain(StreamXML * s) {
 						case_wsp:
 							s->tag_name_len = p - s->tag_name;
 							if (s->tag_name_len < 1) {
-								s->error(s, SYNTAX_ERROR, "Empty tag name");
+								s->error(s, SYNTAX_ERROR, "Empty tag name (%-.10s -> %-.10s)",s->tag_name,p);
 								return;
 							}
 							s->state = TAG_CLOSE_END;
@@ -721,6 +740,7 @@ CODE:
 	s->last = s->ptr = s->buf = safemalloc( s->buf_size );
 	if (!s->buf) croak("Can't allocate buffer");
 	//memset(s->buf, 'x', s->buf_size ); s->buf[s->buf_size] = 0;
+	//warn("Created parser. buf=%p, last=%p", s->buf, s->last);
 	s->error        = on_error;
 	s->stanza       = on_stanza;
 	s->stream_open  = on_stream_open;
@@ -742,6 +762,9 @@ parse(SV *self, SV *svbuf)
 CODE:
 	StreamXML * s = ( StreamXML * ) SvUV( SvRV( self ) );
 	STRLEN len, part;
+#if TRACE
+	warn("parse(%s)",SvPV_nolen(svbuf));
+#endif
 	char *buf = SvPV( svbuf,len );
 	char *end;
 	if (s->buf_size - s->size < len) {
@@ -776,7 +799,9 @@ CODE:
 #if TRACE
 		printf("Received (%d) [%-.*s]. Now at: [%c][%s] (%p -> %d -> %p)\n", len, len, buf, *s->ptr, s->ptr, s->buf, s->size, s->ptr);
 #endif
+		SvREFCNT_inc(self);
 		sxml_drain(s);
+		SvREFCNT_dec(self);
 	}
 
 void
@@ -791,6 +816,7 @@ CODE:
 	safefree(s->stack);
 	safefree(s->ctx);
 	safefree(s);
+	//warn("Destroyed parser");
 
 
 
